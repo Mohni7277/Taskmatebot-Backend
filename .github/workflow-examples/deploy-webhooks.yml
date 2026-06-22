@@ -1,0 +1,603 @@
+name: Example - Deploy TaskMate Webhook Server to Cloud Run
+
+on:
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+  SERVICE_NAME: ${{ vars.CLOUD_RUN_SERVICE_NAME }}
+  REGION: ${{ vars.GOOGLE_CLOUD_REGION }}
+
+jobs:
+  deploy:
+    name: Deploy Webhook Server
+    runs-on: ubuntu-latest
+    
+    # Add a concurrency group to prevent multiple deployments
+    concurrency:
+      group: deploy-webhooks-${{ github.ref }}
+      cancel-in-progress: true
+
+    outputs:
+      service_url: ${{ steps.get_url.outputs.url }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+
+    - name: Install pnpm
+      uses: pnpm/action-setup@v2
+      with:
+        version: 8
+        run_install: false
+
+    - name: Get pnpm store directory
+      shell: bash
+      run: |
+        echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+    - name: Setup pnpm cache
+      uses: actions/cache@v3
+      with:
+        path: ${{ env.STORE_PATH }}
+        key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+        restore-keys: |
+          ${{ runner.os }}-pnpm-store-
+
+    - name: Install dependencies
+      run: pnpm install --frozen-lockfile
+
+    - name: Validate webhook server TypeScript
+      run: |
+        npx tsc --noEmit src/webhook-server.ts
+        echo "✅ TypeScript validation passed"
+
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v1
+      with:
+        credentials_json: ${{ secrets.GOOGLE_CLOUD_SERVICE_ACCOUNT_KEY }}
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v1
+
+    - name: Configure Docker to use gcloud as credential helper
+      run: |
+        gcloud auth configure-docker
+
+    - name: Verify required secrets
+      run: |
+        if [ -z "${{ secrets.GOOGLE_CLOUD_PROJECT }}" ]; then
+          echo "❌ GOOGLE_CLOUD_PROJECT secret is not set"
+          exit 1
+        fi
+        if [ -z "${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" ]; then
+          echo "❌ NEXT_PUBLIC_SUPABASE_URL secret is not set"
+          exit 1
+        fi
+        if [ -z "${{ secrets.NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY }}" ]; then
+          echo "❌ NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY secret is not set"
+          exit 1
+        fi
+        echo "✅ All required secrets are set"
+
+    - name: Build Docker image
+      run: |
+        IMAGE_NAME="gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA"
+        echo "Building image: $IMAGE_NAME"
+        docker build -f Dockerfile.webhooks -t $IMAGE_NAME .
+        docker tag $IMAGE_NAME gcr.io/$PROJECT_ID/$SERVICE_NAME:latest
+
+    - name: Push Docker image
+      run: |
+        echo "Pushing Docker images to GCR..."
+        docker push gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA
+        docker push gcr.io/$PROJECT_ID/$SERVICE_NAME:latest
+
+    - name: Deploy to Cloud Run
+      run: |
+        echo "Deploying to Cloud Run..."
+        gcloud run deploy $SERVICE_NAME \
+          --image gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA \
+          --platform managed \
+          --region $REGION \
+          --allow-unauthenticated \
+          --memory 2Gi \
+          --cpu 2 \
+          --max-instances 10 \
+          --min-instances 1 \
+          --concurrency 80 \
+          --timeout 300 \
+          --set-env-vars NODE_ENV=production \
+          --set-env-vars PORT=8080 \
+          --set-env-vars NEXT_PUBLIC_SUPABASE_URL=${{ secrets.NEXT_PUBLIC_SUPABASE_URL }} \
+          --set-env-vars NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=${{ secrets.NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY }} \
+          --set-env-vars BOT_BASE_URL=${{ secrets.BOT_BASE_URL }} \
+          --set-env-vars MICROSOFT_APP_ID=${{ secrets.MICROSOFT_APP_ID }} \
+          --set-env-vars MICROSOFT_APP_PASSWORD=${{ secrets.MICROSOFT_APP_PASSWORD }} \
+          --port 8080
+
+    - name: Get Cloud Run service URL
+      id: get_url
+      run: |
+        URL=$(gcloud run services describe $SERVICE_NAME --region $REGION --format 'value(status.url)')
+        echo "url=$URL" >> $GITHUB_OUTPUT
+        echo "Webhook server deployed to: $URL"
+
+    - name: Test deployment health
+      run: |
+        SERVICE_URL="${{ steps.get_url.outputs.url }}"
+        
+        echo "🔍 Testing health endpoint..."
+        for i in {1..5}; do
+          if curl -f "$SERVICE_URL/health"; then
+            echo "✅ Health check passed!"
+            break
+          else
+            echo "⏳ Health check failed, retrying in 10 seconds... ($i/5)"
+            sleep 10
+          fi
+        done
+        
+        echo "🔍 Testing ready endpoint..."
+        curl -f "$SERVICE_URL/ready" || (echo "❌ Ready check failed" && exit 1)
+        
+        echo "✅ Deployment health checks passed!"
+
+    - name: Display deployment information
+      run: |
+        SERVICE_URL="${{ steps.get_url.outputs.url }}"
+        
+        echo "🎉 Deployment successful!"
+        echo "📋 Webhook endpoints available:"
+        echo "  🔗 Health: $SERVICE_URL/health"
+        echo "  🔗 Ready: $SERVICE_URL/ready"
+        echo "  🔗 WhatsApp: $SERVICE_URL/org/{orgId}/whatsapp/webhook"
+        echo "  🔗 Teams: $SERVICE_URL/org/{orgId}/messages"
+        echo "  🔗 Organizations API: $SERVICE_URL/api/organizations"
+        echo "  🔗 Dev Portal Config: $SERVICE_URL/api/dev-portal/{orgId}/config"
+        
+        echo ""
+        echo "📝 Next steps:"
+        echo "1. Update webhook URLs in external services to use: $SERVICE_URL"
+        echo "2. Test endpoints with your organization IDs"
+        echo "3. Monitor logs: gcloud run logs tail $SERVICE_NAME --region $REGION"
+
+  test:
+    name: Test Webhook Endpoints
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: success()
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Test webhook endpoints
+      env:
+        SERVICE_URL: ${{ needs.deploy.outputs.service_url }}
+      run: |
+        echo "🧪 Testing webhook endpoints..."
+        echo "Service URL: $SERVICE_URL"
+        
+        # Test health endpoint
+        echo "Testing health endpoint..."
+        response=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/health")
+        if [ "$response" = "200" ]; then
+          echo "✅ Health endpoint: OK"
+        else
+          echo "❌ Health endpoint failed: $response"
+          exit 1
+        fi
+        
+        # Test ready endpoint
+        echo "Testing ready endpoint..."
+        response=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/ready")
+        if [ "$response" = "200" ] || [ "$response" = "503" ]; then
+          echo "✅ Ready endpoint: OK (status: $response)"
+        else
+          echo "❌ Ready endpoint failed: $response"
+          exit 1
+        fi
+        
+        # Test organizations API
+        echo "Testing organizations API..."
+        response=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/api/organizations")
+        if [ "$response" = "200" ]; then
+          echo "✅ Organizations API: OK"
+        else
+          echo "❌ Organizations API failed: $response"
+          exit 1
+        fi
+        
+        # Test webhook verification (should return 200 for verification)
+        echo "Testing webhook verification..."
+        response=$(curl -s -o /dev/null -w "%{http_code}" \
+          -X POST "$SERVICE_URL/org/test-org/whatsapp/webhook" \
+          -H "Content-Type: application/json" \
+          -d '{"event":"webhook_verification","instanceId":"test"}')
+        if [ "$response" = "200" ]; then
+          echo "✅ Webhook verification: OK"
+        else
+          echo "❌ Webhook verification failed: $response"
+          exit 1
+        fi
+        
+        echo "🎉 All webhook endpoint tests passed!"
+
+  notify:
+    name: Notify Deployment Success
+    runs-on: ubuntu-latest
+    needs: [deploy, test]
+    if: success()
+    
+    steps:
+    - name: Post deployment summary
+      run: |
+        SERVICE_URL="${{ needs.deploy.outputs.service_url }}"
+        
+        echo "🚀 TaskMate Webhook Server Successfully Deployed!"
+        echo "=================================================="
+        echo ""
+        echo "🌐 Service URL: $SERVICE_URL"
+        echo "🏷️  Docker Image: gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }}"
+        echo "📍 Region: ${{ env.REGION }}"
+        echo "🔧 Git Commit: ${{ github.sha }}"
+        echo "🌿 Branch: ${{ github.ref_name }}"
+        echo ""
+        echo "📋 Available Endpoints:"
+        echo "  • Health Check: $SERVICE_URL/health"
+        echo "  • Readiness: $SERVICE_URL/ready"
+        echo "  • WhatsApp Webhook: $SERVICE_URL/org/{orgId}/whatsapp/webhook"
+        echo "  • Teams Webhook: $SERVICE_URL/org/{orgId}/messages" 
+        echo "  • Organizations API: $SERVICE_URL/api/organizations"
+        echo "  • Dev Portal Config: $SERVICE_URL/api/dev-portal/{orgId}/config"
+        echo ""
+        echo "🛠️  Management Commands:"
+        echo "  • View logs: gcloud run logs tail ${{ env.SERVICE_NAME }} --region ${{ env.REGION }}"
+        echo "  • Update service: gcloud run services update ${{ env.SERVICE_NAME }} --region ${{ env.REGION }}"
+        echo "  • Scale service: gcloud run services update ${{ env.SERVICE_NAME }} --min-instances N --max-instances M --region ${{ env.REGION }}"
+        echo ""
+        echo "✅ Deployment completed successfully!"
+      uses: actions/cache@v3
+      with:
+        path: ${{ env.STORE_PATH }}
+        key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+        restore-keys: |
+          ${{ runner.os }}-pnpm-store-
+
+    - name: Install dependencies
+      run: pnpm install --frozen-lockfile
+
+    - name: Build TypeScript
+      run: pnpm run build
+
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v1
+      with:
+        credentials_json: ${{ secrets.GOOGLE_CLOUD_SERVICE_ACCOUNT_KEY }}
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v1
+
+    - name: Configure Docker to use gcloud as credential helper
+      run: |
+        gcloud auth configure-docker
+
+    - name: Build Docker image
+      run: |
+        docker build -f Dockerfile.webhooks -t gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA .
+        docker tag gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA gcr.io/$PROJECT_ID/$SERVICE_NAME:latest
+
+    - name: Push Docker image
+      run: |
+        docker push gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA
+        docker push gcr.io/$PROJECT_ID/$SERVICE_NAME:latest
+
+    - name: Deploy to Cloud Run
+      run: |
+        gcloud run deploy $SERVICE_NAME \
+          --image gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA \
+          --platform managed \
+          --region $REGION \
+          --allow-unauthenticated \
+          --memory 2Gi \
+          --cpu 2 \
+          --max-instances 10 \
+          --min-instances 1 \
+          --concurrency 80 \
+          --timeout 300 \
+          --set-env-vars NODE_ENV=production \
+          --set-env-vars PORT=8080 \
+          --set-env-vars NEXT_PUBLIC_SUPABASE_URL=${{ secrets.NEXT_PUBLIC_SUPABASE_URL }} \
+          --set-env-vars NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=${{ secrets.NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY }} \
+          --set-env-vars BOT_BASE_URL=${{ secrets.BOT_BASE_URL }} \
+          --set-env-vars MICROSOFT_APP_ID=${{ secrets.MICROSOFT_APP_ID }} \
+          --set-env-vars MICROSOFT_APP_PASSWORD=${{ secrets.MICROSOFT_APP_PASSWORD }} \
+          --port 8080
+
+    - name: Get Cloud Run service URL
+      id: service_url
+      run: |
+        URL=$(gcloud run services describe $SERVICE_NAME --region $REGION --format 'value(status.url)')
+        echo "url=$URL" >> $GITHUB_OUTPUT
+        echo "Webhook server deployed to: $URL"
+
+    - name: Test deployment health
+      run: |
+        SERVICE_URL="${{ steps.service_url.outputs.url }}"
+        
+        echo "🔍 Testing health endpoint..."
+        curl -f "$SERVICE_URL/health" || (echo "❌ Health check failed" && exit 1)
+        
+        echo "🔍 Testing ready endpoint..."
+        curl -f "$SERVICE_URL/ready" || (echo "❌ Ready check failed" && exit 1)
+        
+        echo "✅ Deployment health checks passed!"
+
+    - name: Update deployment status
+      run: |
+        SERVICE_URL="${{ steps.service_url.outputs.url }}"
+        
+        echo "🎉 Deployment successful!"
+        echo "📋 Webhook endpoints available:"
+        echo "  🔗 Health: $SERVICE_URL/health"
+        echo "  🔗 Ready: $SERVICE_URL/ready"
+        echo "  🔗 WhatsApp: $SERVICE_URL/org/{orgId}/whatsapp/webhook"
+        echo "  🔗 Teams: $SERVICE_URL/org/{orgId}/messages"
+        echo "  🔗 Organizations API: $SERVICE_URL/api/organizations"
+        echo "  🔗 Dev Portal Config: $SERVICE_URL/api/dev-portal/{orgId}/config"
+        
+        echo "📝 Next steps:"
+        echo "1. Update webhook URLs in external services"
+        echo "2. Test endpoints with your organization IDs"
+        echo "3. Monitor logs: gcloud run logs tail $SERVICE_NAME --region $REGION"
+
+  test:
+    name: Test Webhook Endpoints
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: success()
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Test webhook endpoints
+      env:
+        SERVICE_URL: ${{ needs.deploy.outputs.service_url }}
+      run: |
+        echo "🧪 Testing webhook endpoints..."
+        
+        # Test health endpoint
+        echo "Testing health endpoint..."
+        response=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/health")
+        if [ "$response" = "200" ]; then
+          echo "✅ Health endpoint: OK"
+        else
+          echo "❌ Health endpoint failed: $response"
+          exit 1
+        fi
+        
+        # Test organizations API
+        echo "Testing organizations API..."
+        response=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/api/organizations")
+        if [ "$response" = "200" ]; then
+          echo "✅ Organizations API: OK"
+        else
+          echo "❌ Organizations API failed: $response"
+          exit 1
+        fi
+        
+        # Test webhook verification (should return 200 for verification)
+        echo "Testing webhook verification..."
+        response=$(curl -s -o /dev/null -w "%{http_code}" \
+          -X POST "$SERVICE_URL/org/test-org/whatsapp/webhook" \
+          -H "Content-Type: application/json" \
+          -d '{"event":"webhook_verification","instanceId":"test"}')
+        if [ "$response" = "200" ]; then
+          echo "✅ Webhook verification: OK"
+        else
+          echo "❌ Webhook verification failed: $response"
+          exit 1
+        fi
+        
+        echo "🎉 All webhook endpoint tests passed!"
+      uses: actions/cache@v3
+      with:
+        path: ${{ env.STORE_PATH }}
+        key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+        restore-keys: |
+          ${{ runner.os }}-pnpm-store-
+
+    - name: Install dependencies
+      run: pnpm install --frozen-lockfile
+
+    - name: Validate webhook server TypeScript
+      run: |
+        npx tsc --noEmit src/webhook-server.ts
+        echo "✅ TypeScript validation passed"
+
+    - name: Set up Google Cloud CLI
+      uses: google-github-actions/setup-gcloud@v1
+      with:
+        project_id: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+        service_account_key: ${{ secrets.GOOGLE_CLOUD_SA_KEY }}
+        export_default_credentials: true
+
+    - name: Configure Docker to use gcloud as a credential helper
+      run: |
+        gcloud auth configure-docker
+
+    - name: Verify required secrets
+      run: |
+        if [ -z "${{ secrets.GOOGLE_CLOUD_PROJECT }}" ]; then
+          echo "❌ GOOGLE_CLOUD_PROJECT secret is not set"
+          exit 1
+        fi
+        if [ -z "${{ secrets.GOOGLE_CLOUD_SA_KEY }}" ]; then
+          echo "❌ GOOGLE_CLOUD_SA_KEY secret is not set"
+          exit 1
+        fi
+        if [ -z "${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" ]; then
+          echo "❌ NEXT_PUBLIC_SUPABASE_URL secret is not set"
+          exit 1
+        fi
+        if [ -z "${{ secrets.NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY }}" ]; then
+          echo "❌ NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY secret is not set"
+          exit 1
+        fi
+        echo "✅ All required secrets are set"
+
+    - name: Build Docker image
+      run: |
+        IMAGE_NAME="gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA"
+        echo "Building image: $IMAGE_NAME"
+        docker build -f Dockerfile.webhooks -t $IMAGE_NAME .
+        echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_ENV
+
+    - name: Push Docker image
+      run: |
+        echo "Pushing image: $IMAGE_NAME"
+        docker push $IMAGE_NAME
+
+    - name: Deploy to Cloud Run
+      run: |
+        echo "Deploying $SERVICE_NAME to Cloud Run..."
+        
+        # Prepare environment variables
+        ENV_VARS="NEXT_PUBLIC_SUPABASE_URL=${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}"
+        ENV_VARS="${ENV_VARS},NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=${{ secrets.NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY }}"
+        ENV_VARS="${ENV_VARS},NODE_ENV=production"
+        
+        # Add optional environment variables if they exist
+        if [ ! -z "${{ secrets.BOT_BASE_URL }}" ]; then
+          ENV_VARS="${ENV_VARS},BOT_BASE_URL=${{ secrets.BOT_BASE_URL }}"
+        fi
+        
+        if [ ! -z "${{ secrets.WAAPI_API_KEY }}" ]; then
+          ENV_VARS="${ENV_VARS},WAAPI_API_KEY=${{ secrets.WAAPI_API_KEY }}"
+        fi
+        
+        if [ ! -z "${{ secrets.WAAPI_INSTANCE_ID }}" ]; then
+          ENV_VARS="${ENV_VARS},WAAPI_INSTANCE_ID=${{ secrets.WAAPI_INSTANCE_ID }}"
+        fi
+        
+        if [ ! -z "${{ secrets.MICROSOFT_APP_ID }}" ]; then
+          ENV_VARS="${ENV_VARS},MICROSOFT_APP_ID=${{ secrets.MICROSOFT_APP_ID }}"
+        fi
+        
+        if [ ! -z "${{ secrets.MICROSOFT_APP_PASSWORD }}" ]; then
+          ENV_VARS="${ENV_VARS},MICROSOFT_APP_PASSWORD=${{ secrets.MICROSOFT_APP_PASSWORD }}"
+        fi
+
+        # Deploy the service
+        gcloud run deploy $SERVICE_NAME \
+          --image $IMAGE_NAME \
+          --platform managed \
+          --region $REGION \
+          --allow-unauthenticated \
+          --port 8080 \
+          --memory 1Gi \
+          --cpu 1 \
+          --timeout 300 \
+          --concurrency 1000 \
+          --max-instances 10 \
+          --set-env-vars "$ENV_VARS" \
+          --quiet
+
+    - name: Get service URL
+      id: get-url
+      run: |
+        SERVICE_URL=$(gcloud run services describe $SERVICE_NAME --platform managed --region $REGION --format 'value(status.url)')
+        echo "SERVICE_URL=$SERVICE_URL" >> $GITHUB_OUTPUT
+        echo "service_url=$SERVICE_URL" >> $GITHUB_ENV
+
+    - name: Test health endpoint
+      run: |
+        echo "Testing health endpoint..."
+        sleep 10  # Wait for service to be ready
+        
+        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ steps.get-url.outputs.SERVICE_URL }}/health")
+        
+        if [ "$HTTP_STATUS" -eq 200 ]; then
+          echo "✅ Health check passed (HTTP $HTTP_STATUS)"
+        else
+          echo "❌ Health check failed (HTTP $HTTP_STATUS)"
+          exit 1
+        fi
+
+    - name: Test ready endpoint
+      run: |
+        echo "Testing readiness endpoint..."
+        
+        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ steps.get-url.outputs.SERVICE_URL }}/ready")
+        
+        if [ "$HTTP_STATUS" -eq 200 ]; then
+          echo "✅ Readiness check passed (HTTP $HTTP_STATUS)"
+        else
+          echo "⚠️ Readiness check returned HTTP $HTTP_STATUS (this may be expected if missing optional configs)"
+        fi
+
+    - name: Test organizations API
+      run: |
+        echo "Testing organizations API..."
+        
+        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ steps.get-url.outputs.SERVICE_URL }}/api/organizations")
+        
+        if [ "$HTTP_STATUS" -eq 200 ]; then
+          echo "✅ Organizations API check passed (HTTP $HTTP_STATUS)"
+        else
+          echo "❌ Organizations API check failed (HTTP $HTTP_STATUS)"
+          exit 1
+        fi
+
+    - name: Output deployment summary
+      run: |
+        echo "🎉 Deployment completed successfully!"
+        echo "======================================"
+        echo "Service Name: $SERVICE_NAME"
+        echo "Region: $REGION"
+        echo "Service URL: ${{ steps.get-url.outputs.SERVICE_URL }}"
+        echo ""
+        echo "📋 Available Endpoints:"
+        echo "  🔗 Health: ${{ steps.get-url.outputs.SERVICE_URL }}/health"
+        echo "  🔗 WhatsApp: ${{ steps.get-url.outputs.SERVICE_URL }}/org/{orgId}/whatsapp/webhook"
+        echo "  🔗 Teams: ${{ steps.get-url.outputs.SERVICE_URL }}/org/{orgId}/messages"
+        echo "  🔗 Organizations: ${{ steps.get-url.outputs.SERVICE_URL }}/api/organizations"
+        echo ""
+        echo "🔍 Monitoring:"
+        echo "  View logs: gcloud run logs tail $SERVICE_NAME --region $REGION"
+
+    - name: Create deployment comment (if PR)
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `## 🚀 Webhook Server Deployed
+
+**Service URL:** ${{ steps.get-url.outputs.SERVICE_URL }}
+
+### Available Endpoints:
+- 🔗 Health: \`${{ steps.get-url.outputs.SERVICE_URL }}/health\`
+- 🔗 WhatsApp Webhook: \`${{ steps.get-url.outputs.SERVICE_URL }}/org/{orgId}/whatsapp/webhook\`
+- 🔗 Teams Webhook: \`${{ steps.get-url.outputs.SERVICE_URL }}/org/{orgId}/messages\`
+- 🔗 Organizations API: \`${{ steps.get-url.outputs.SERVICE_URL }}/api/organizations\`
+
+### Next Steps:
+1. Update your webhook URLs in external services
+2. Test the endpoints
+3. Monitor with: \`gcloud run logs tail ${{ env.SERVICE_NAME }} --region ${{ env.REGION }}\`
+
+**Deployment Time:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+**Commit:** ${process.env.GITHUB_SHA.substring(0, 7)}`
+          })

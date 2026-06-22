@@ -1,0 +1,107 @@
+# TaskMate Bot - Webhook-Only Cloud Run Dockerfile
+# Optimized for webhook endpoints deployment
+
+# ================================
+# Stage 1: Dependencies
+# ================================
+FROM --platform=linux/amd64 node:20-alpine AS dependencies
+
+# Install system dependencies for native modules
+RUN apk add --no-cache \
+    python3 \
+    make \
+    g++ \
+    libc6-compat
+
+# Set working directory
+WORKDIR /app
+
+# Copy package manager files for better caching
+COPY package.json ./
+COPY pnpm-lock.yaml ./
+
+# Install pnpm globally
+RUN npm install -g pnpm
+
+# Install dependencies
+RUN pnpm install --frozen-lockfile --prod=false
+
+# ================================
+# Stage 2: Build
+# ================================
+FROM --platform=linux/amd64 node:20-alpine AS builder
+
+# Install system dependencies
+RUN apk add --no-cache python3 make g++ libc6-compat
+
+WORKDIR /app
+
+# Install pnpm
+RUN npm install -g pnpm
+
+# Copy dependencies from previous stage
+COPY --from=dependencies /app/node_modules ./node_modules
+COPY --from=dependencies /app/package.json ./package.json
+
+# Copy source code (only what we need for webhooks)
+COPY tsconfig.json ./
+COPY src/webhook-server.ts ./src/
+COPY src/mastra/ ./src/mastra/
+COPY src/utils/ ./src/utils/
+COPY src/db/ ./src/db/
+
+# Build the webhook server (compile TypeScript if needed)
+# Note: tsx can run TypeScript directly, but we'll prepare for potential compilation
+RUN echo "Build preparation complete"
+
+# ================================
+# Stage 3: Production Runtime
+# ================================
+FROM --platform=linux/amd64 node:20-alpine AS runtime
+
+# Create app user for security
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S taskmate -u 1001 -G nodejs
+
+# Set working directory
+WORKDIR /app
+
+# Install pnpm and tsx for TypeScript execution
+RUN npm install -g pnpm tsx
+
+# Copy package files
+COPY package.json pnpm-lock.yaml ./
+
+# Install only production dependencies + tsx for TS execution
+RUN pnpm install --frozen-lockfile --prod=true && \
+    pnpm add tsx && \
+    pnpm store prune && \
+    npm cache clean --force
+
+# Copy built application from builder stage
+COPY --from=builder --chown=taskmate:nodejs /app/src ./src
+COPY --from=builder --chown=taskmate:nodejs /app/tsconfig.json ./
+
+# Create necessary directories
+RUN mkdir -p /app/logs /app/tmp && \
+    chown -R taskmate:nodejs /app
+
+# Set environment variables for production
+ENV NODE_ENV=production
+ENV NODE_OPTIONS="--max-old-space-size=512"
+
+# Cloud Run specific: Use PORT environment variable
+ENV PORT=8080
+
+# Switch to non-root user
+USER taskmate
+
+# Expose the port that Cloud Run expects
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD node -e "fetch('http://localhost:$PORT/health').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"
+
+# Start the webhook server using tsx for direct TypeScript execution
+CMD ["tsx", "src/webhook-server.ts"]

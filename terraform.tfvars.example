@@ -1,0 +1,8 @@
+project_id            = "your-gcp-project-id"
+region                = "asia-south1"
+zone                  = "asia-south1-a"
+instance_name         = "taskmatebot-vm"
+firewall_name         = "allow-http-https-ssh"
+service_account_email = "terraform-deployer@your-gcp-project-id.iam.gserviceaccount.com"
+ssh_username          = "ubuntu"
+ssh_public_key_path   = "./id_ed25519.pub"

@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TaskMate Bot - Developer Portal</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #6264A7;
+            border-bottom: 2px solid #6264A7;
+            padding-bottom: 10px;
+        }
+        .org-card {
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 20px;
+            margin: 15px 0;
+            background: #fafafa;
+        }
+        .org-card.active {
+            border-color: #6264A7;
+            background: #f0f0ff;
+        }
+        .endpoint {
+            background: #2d3748;
+            color: white;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            margin: 10px 0;
+        }
+        .setup-steps {
+            background: #e6fffa;
+            border-left: 4px solid #38b2ac;
+            padding: 15px;
+            margin: 15px 0;
+        }
+        .setup-steps ol {
+            margin: 0;
+            padding-left: 20px;
+        }
+        .button {
+            background: #6264A7;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+            text-decoration: none;
+            display: inline-block;
+        }
+        .button:hover {
+            background: #5055a0;
+        }
+        .status {
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        .status.active {
+            background: #c6f6d5;
+            color: #22543d;
+        }
+        .status.inactive {
+            background: #fed7d7;
+            color: #822727;
+        }
+        .org-input {
+            margin: 20px 0;
+        }
+        .org-input input {
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin-right: 10px;
+            width: 200px;
+        }
+        .platform-tabs {
+            display: flex;
+            margin: 20px 0;
+            border-bottom: 2px solid #ddd;
+        }
+        .platform-tab {
+            padding: 10px 20px;
+            background: #f0f0f0;
+            border: none;
+            cursor: pointer;
+            border-radius: 8px 8px 0 0;
+            margin-right: 5px;
+            font-weight: bold;
+        }
+        .platform-tab.active {
+            background: #6264A7;
+            color: white;
+        }
+        .platform-tab.whatsapp.active {
+            background: #25D366;
+        }
+        .platform-content {
+            display: none;
+        }
+        .platform-content.active {
+            display: block;
+        }
+        .whatsapp-theme {
+            border-color: #25D366;
+            background: #f0fff4;
+        }
+        .whatsapp-theme .setup-steps {
+            background: #e6ffed;
+            border-left: 4px solid #25D366;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 TaskMate Bot - Developer Portal</h1>
+        
+        <p>Configure your organization's bot endpoints for Teams and WhatsApp platforms.</p>
+
+        <!-- Platform Selection Tabs -->
+        <div class="platform-tabs">
+            <button class="platform-tab active" onclick="switchPlatform('teams')">📧 Microsoft Teams</button>
+            <button class="platform-tab whatsapp" onclick="switchPlatform('whatsapp')">📱 WhatsApp</button>
+        </div>
+
+        <!-- Teams Platform Content -->
+        <div id="teams-content" class="platform-content active">
+            <div class="org-input">
+                <h3>Get Teams Configuration for Your Organization</h3>
+                <input type="text" id="teamsOrgIdInput" placeholder="Enter your organization ID" />
+                <button class="button" onclick="getOrgConfig('teams')">Get Configuration</button>
+            </div>
+
+            <div id="teamsOrgConfig" style="display: none;">
+                <h3>Teams Organization Configuration</h3>
+                <div id="teamsConfigDetails"></div>
+            </div>
+
+            <h2>Available Organizations - Teams</h2>
+            <div id="teamsOrganizationsList">
+                <p>Loading Teams organizations...</p>
+            </div>
+        </div>
+
+        <!-- WhatsApp Platform Content -->
+        <div id="whatsapp-content" class="platform-content">
+            <div class="org-input">
+                <h3>Get WhatsApp Configuration for Your Organization</h3>
+                <input type="text" id="whatsappOrgIdInput" placeholder="Enter your organization ID" />
+                <button class="button" onclick="getOrgConfig('whatsapp')">Get Configuration</button>
+            </div>
+
+            <div id="whatsappOrgConfig" style="display: none;">
+                <h3>WhatsApp Organization Configuration</h3>
+                <div id="whatsappConfigDetails"></div>
+            </div>
+
+            <h2>Available Organizations - WhatsApp</h2>
+            <div id="whatsappOrganizationsList">
+                <p>Loading WhatsApp organizations...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const BOT_BASE_URL = window.location.origin; // Use current domain
+        let currentPlatform = 'teams';
+
+        function switchPlatform(platform) {
+            // Update active tab
+            document.querySelectorAll('.platform-tab').forEach(tab => tab.classList.remove('active'));
+            document.querySelector(`.platform-tab${platform === 'whatsapp' ? '.whatsapp' : ''}:nth-child(${platform === 'teams' ? '1' : '2'})`).classList.add('active');
+            
+            // Update active content
+            document.querySelectorAll('.platform-content').forEach(content => content.classList.remove('active'));
+            document.getElementById(`${platform}-content`).classList.add('active');
+            
+            currentPlatform = platform;
+            
+            // Load organizations for the selected platform
+            if (platform === 'teams') {
+                loadTeamsOrganizations();
+            } else {
+                loadWhatsAppOrganizations();
+            }
+        }
+
+        async function loadTeamsOrganizations() {
+            try {
+                const response = await fetch(`${BOT_BASE_URL}/api/organizations`);
+                const data = await response.json();
+                
+                const container = document.getElementById('teamsOrganizationsList');
+                
+                if (data.success && data.organizations.length > 0) {
+                    container.innerHTML = data.organizations.map(org => `
+                        <div class="org-card ${org.status}">
+                            <h3>${org.orgName || org.orgId} <span class="status ${org.status}">${org.status}</span></h3>
+                            <p><strong>Organization ID:</strong> ${org.orgId}</p>
+                            <div class="endpoint">${org.endpoint}</div>
+                            <div style="margin-top: 15px;">
+                                <button class="button" onclick="getOrgConfig('teams', '${org.orgId}')">Get Configuration</button>
+                                <a href="${BOT_BASE_URL}/api/dev-portal/${org.orgId}/manifest" class="button" download>Download Manifest</a>
+                            </div>
+                        </div>
+                    `).join('');
+                } else {
+                    container.innerHTML = '<p>No Teams organizations configured yet.</p>';
+                }
+            } catch (error) {
+                console.error('Error loading Teams organizations:', error);
+                document.getElementById('teamsOrganizationsList').innerHTML = '<p>Error loading Teams organizations.</p>';
+            }
+        }
+
+        async function loadWhatsAppOrganizations() {
+            try {
+                const response = await fetch(`${BOT_BASE_URL}/api/organizations`);
+                const data = await response.json();
+                
+                const container = document.getElementById('whatsappOrganizationsList');
+                
+                if (data.success && data.organizations.length > 0) {
+                    // Filter organizations that have WhatsApp enabled or show all with WhatsApp endpoint
+                    const whatsappOrgs = data.organizations.map(org => ({
+                        ...org,
+                        endpoint: org.endpoint.replace('/messages', '/whatsapp/webhook'), // Convert to WhatsApp endpoint
+                        platform: 'whatsapp'
+                    }));
+                    
+                    container.innerHTML = whatsappOrgs.map(org => `
+                        <div class="org-card ${org.status} whatsapp-theme">
+                            <h3>📱 ${org.orgName || org.orgId} <span class="status ${org.status}">${org.status}</span></h3>
+                            <p><strong>Organization ID:</strong> ${org.orgId}</p>
+                            <div class="endpoint">${org.endpoint}</div>
+                            <div style="margin-top: 15px;">
+                                <button class="button" onclick="getOrgConfig('whatsapp', '${org.orgId}')">Get Configuration</button>
+                                <a href="${BOT_BASE_URL}/api/dev-portal/${org.orgId}/whatsapp-manifest" class="button" download>Download Webhook Config</a>
+                            </div>
+                        </div>
+                    `).join('');
+                } else {
+                    container.innerHTML = '<p>No WhatsApp organizations configured yet.</p>';
+                }
+            } catch (error) {
+                console.error('Error loading WhatsApp organizations:', error);
+                document.getElementById('whatsappOrganizationsList').innerHTML = '<p>Error loading WhatsApp organizations.</p>';
+            }
+        }
+
+        async function getOrgConfig(platform, orgId = null) {
+            const targetOrgId = orgId || document.getElementById(`${platform}OrgIdInput`).value.trim();
+            
+            if (!targetOrgId) {
+                alert('Please enter an organization ID');
+                return;
+            }
+
+            try {
+                let response, configDiv, detailsDiv;
+                
+                if (platform === 'teams') {
+                    response = await fetch(`${BOT_BASE_URL}/api/dev-portal/${targetOrgId}/config`);
+                    configDiv = document.getElementById('teamsOrgConfig');
+                    detailsDiv = document.getElementById('teamsConfigDetails');
+                } else {
+                    response = await fetch(`${BOT_BASE_URL}/api/dev-portal/${targetOrgId}/config`);
+                    configDiv = document.getElementById('whatsappOrgConfig');
+                    detailsDiv = document.getElementById('whatsappConfigDetails');
+                }
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    const config = data.configuration;
+                    const org = data.organization;
+                    
+                    if (platform === 'teams') {
+                        detailsDiv.innerHTML = `
+                            <div class="org-card active">
+                                <h3>${org.orgName || org.orgId} Configuration</h3>
+                                <p><strong>Organization ID:</strong> ${org.orgId}</p>
+                                <p><strong>Status:</strong> <span class="status ${org.status}">${org.status}</span></p>
+                                
+                                <h4>Teams Bot Messaging Endpoint:</h4>
+                                <div class="endpoint">${config.messagingEndpoint}</div>
+                                
+                                <div class="setup-steps">
+                                    <h4>Setup Instructions:</h4>
+                                    <ol>
+                                        ${config.setupInstructions.steps.map(step => `<li>${step}</li>`).join('')}
+                                    </ol>
+                                </div>
+                                
+                                <div style="margin-top: 20px;">
+                                    <a href="${config.manifestUrl}" class="button" download>Download Teams App Manifest</a>
+                                    <button class="button" onclick="copyToClipboard('${config.messagingEndpoint}')">Copy Endpoint URL</button>
+                                </div>
+                            </div>
+                        `;
+                    } else {
+                        detailsDiv.innerHTML = `
+                            <div class="org-card active whatsapp-theme">
+                                <h3>📱 ${org.orgName || org.orgId} WhatsApp Configuration</h3>
+                                <p><strong>Organization ID:</strong> ${org.orgId}</p>
+                                <p><strong>Status:</strong> <span class="status ${org.status}">${org.status}</span></p>
+                                
+                                <h4>WhatsApp Webhook Endpoint:</h4>
+                                <div class="endpoint">${config.webhookEndpoint || config.messagingEndpoint?.replace('/messages', '/whatsapp/webhook')}</div>
+                                
+                                ${config.legacyWebhookEndpoint ? `
+                                    <h4>Legacy Webhook (for existing setups):</h4>
+                                    <div class="endpoint">${config.legacyWebhookEndpoint}</div>
+                                ` : ''}
+                                
+                                <div class="setup-steps">
+                                    <h4>WhatsApp Setup Instructions:</h4>
+                                    <ol>
+                                        <li>Log in to your WAAPI dashboard at <a href="https://waapi.app" target="_blank">https://waapi.app</a></li>
+                                        <li>Navigate to your WhatsApp instance settings</li>
+                                        <li>Set the webhook URL to: <code>${config.webhookEndpoint || config.messagingEndpoint?.replace('/messages', '/whatsapp/webhook')}</code></li>
+                                        <li>Subscribe to the 'message' event</li>
+                                        <li>Ensure your instance is authenticated and ready</li>
+                                        <li>Test the webhook by sending a message to your WhatsApp number</li>
+                                    </ol>
+                                </div>
+                                
+                                <div style="margin-top: 20px;">
+                                    <a href="${BOT_BASE_URL}/api/dev-portal/${targetOrgId}/whatsapp-manifest" class="button" download>Download Webhook Config</a>
+                                    <button class="button" onclick="copyToClipboard('${config.webhookEndpoint || config.messagingEndpoint?.replace('/messages', '/whatsapp/webhook')}')">Copy Webhook URL</button>
+                                </div>
+                            </div>
+                        `;
+                    }
+                    
+                    configDiv.style.display = 'block';
+                } else {
+                    alert(`Error: ${data.error}`);
+                }
+            } catch (error) {
+                console.error('Error getting organization config:', error);
+                alert('Error getting organization configuration');
+            }
+        }
+
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                alert('URL copied to clipboard!');
+            }).catch(err => {
+                console.error('Error copying to clipboard:', err);
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = text;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+                alert('URL copied to clipboard!');
+            });
+        }
+
+        // Load initial platform content when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            loadTeamsOrganizations();
+        });
+    </script>
+</body>
+</html>

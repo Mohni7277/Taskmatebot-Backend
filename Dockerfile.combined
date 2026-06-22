@@ -1,0 +1,101 @@
+# TaskMate Combined Bot - Google Cloud Run Dockerfile
+# Optimized for Cloud Run deployment - WhatsApp and Teams Bots
+
+# ================================
+# Stage 1: Dependencies
+# ================================
+FROM node:20-alpine AS dependencies
+
+# Install system dependencies for native modules
+RUN apk add --no-cache \
+    python3 \
+    make \
+    g++ \
+    libc6-compat
+
+# Set working directory
+WORKDIR /app
+
+# Copy package manager files for better caching
+COPY package.json ./
+
+# Install pnpm globally
+RUN npm install -g pnpm
+
+# Install dependencies
+RUN pnpm install --prod=false
+
+# ================================
+# Stage 2: Build
+# ================================
+FROM node:20-alpine AS builder
+
+# Install system dependencies
+RUN apk add --no-cache python3 make g++ libc6-compat
+
+WORKDIR /app
+
+# Install pnpm
+RUN npm install -g pnpm
+
+# Copy dependencies from previous stage
+COPY --from=dependencies /app/node_modules ./node_modules
+COPY --from=dependencies /app/package.json ./package.json
+
+# Copy source code
+COPY . .
+
+# ================================
+# Stage 3: Production Runtime
+# ================================
+FROM node:20-alpine AS runtime
+
+# Create app user for security
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S taskmate -u 1001 -G nodejs
+
+# Set working directory
+WORKDIR /app
+
+# Install pnpm
+RUN npm install -g pnpm
+
+# Copy package files
+COPY package.json ./
+
+# Install only production dependencies
+RUN pnpm install --prod=true && \
+    pnpm store prune && \
+    npm cache clean --force
+
+# Copy source code and configuration from builder stage
+COPY --from=builder --chown=taskmate:nodejs /app/src ./src
+COPY --from=builder --chown=taskmate:nodejs /app/tsconfig.json ./
+COPY --from=builder --chown=taskmate:nodejs /app/start-combined-bots.ts ./
+
+# Create necessary directories
+RUN mkdir -p /app/logs /app/tmp && \
+    chown -R taskmate:nodejs /app
+
+# Set environment variables for production
+ENV NODE_ENV=production
+ENV NODE_OPTIONS="--max-old-space-size=512"
+
+# Cloud Run specific: Set default port and allow override at runtime
+ENV PORT=8080
+
+# Internal ports for the bots (these are used by the proxy)
+ENV WHATSAPP_PORT=3005
+ENV TEAMS_PORT=4000
+
+# Set the main port for the proxy server
+ENV PROXY_PORT=8080
+
+# Switch to non-root user
+USER taskmate
+
+# Expose the port that Cloud Run expects
+EXPOSE 8080
+
+# Start both bots using the combined starter script
+CMD ["npx", "tsx", "start-combined-bots.ts"]
